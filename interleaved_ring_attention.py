@@ -7,7 +7,7 @@ def main():
     # B: 批处理大小 (Batch size)
     # H: 注意力头数 (Number of heads)
     # S: 序列长度 (Sequence length)
-    # d: kv_lora_rank + qk_rope_head_dim
+    # d: 维度 (Dimension)
     B, H, S_ori, d = 1, 128, 26, 128 # 减小尺寸以便快速测试，逻辑与大尺寸一致
     cp_nranks = 4
     
@@ -17,9 +17,9 @@ def main():
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float32
-    use_log2 = False # 启用 log2 验证
+    use_log2 = True # 所有 exp 和 log 都使用 base-2
     
-    print(f"B={B}, H={H}, S={S} (Local S={S_local}), d={d}, CP={cp_nranks}")
+    print(f"B={B}, H={H}, S={S_ori} (Local S={S_local}), d={d}, CP={cp_nranks}")
     print(f"Using device: {device}, dtype: {dtype}, use_log2: {use_log2}")
     
     q_ori = torch.randn(B, S_ori, H, d, device=device, dtype=dtype)
@@ -36,17 +36,17 @@ def main():
     scale = 1.0 / math.sqrt(d)
 
     print("Computing global reference attention...")
-    out_ref, _, _ = attention_causal_with_lse(
+    out_ref, _ = attention_causal_with_lse(
         q_ori.transpose(2, 1),
         k_ori.transpose(2, 1),
-        v_ori.transpose(2, 1), scale=scale, causal=True)
+        v_ori.transpose(2, 1), scale=scale, causal=True, use_log2=use_log2)
     out_ref = out_ref.transpose(2, 1)  # (B, S_ori, H, d)
 
     print("Computing interleaved ring attention...")
     
-    q_dist = q.view(B, S_local, cp_nranks, H, d)
-    k_dist = k.view(B, S_local, cp_nranks, H, d)
-    v_dist = v.view(B, S_local, cp_nranks, H, d)
+    q_dist = q.reshape(B, S_local, cp_nranks, H, d)
+    k_dist = k.reshape(B, S_local, cp_nranks, H, d)
+    v_dist = v.reshape(B, S_local, cp_nranks, H, d)
     ring_final_out = torch.zeros_like(q_dist)  # (B, S_local, CP, H, d)
     for i in range(cp_nranks):
         q_local = q_dist[:, :, i, :, :].transpose(1, 2)
@@ -60,17 +60,15 @@ def main():
             v_local = v_dist[:, :, j, :, :].transpose(1, 2)
             
             if i >= j:
-                block_out, block_lse, block_lse_log2 = attention_causal_with_lse(
-                    q_local, k_local, v_local, scale=scale, causal=True
+                block_out, block_lse = attention_causal_with_lse(
+                    q_local, k_local, v_local, scale=scale, causal=True, use_log2=use_log2
                 )
-                block_lse = block_lse_log2 if use_log2 else block_lse
             else:
-                block_out_sub, block_lse_sub, block_lse_log2_sub = attention_causal_with_lse(
+                block_out_sub, block_lse_sub = attention_causal_with_lse(
                     q_local[:, :, 1:, :],
                     k_local[:, :, :-1, :], v_local[:, :, :-1, :],
-                    scale=scale, causal=True
+                    scale=scale, causal=True, use_log2=use_log2
                 )
-                block_lse_sub = block_lse_log2_sub if use_log2 else block_lse_sub
                 
                 block_out = torch.zeros((B, H, S_local, d), device=device, dtype=dtype)
                 block_lse = torch.zeros((B, H, S_local), device=device, dtype=dtype)

@@ -21,7 +21,8 @@ def cmp(o1, o2, msg='cmp'):
     
     print(f'{msg:35s}: CosSim={cos_sim:.6f}, MAE={mean_abs_error:.6f}, MaxError={max_error:.6f}')
     
-def attention_causal_with_lse(query_states, key_states, value_states, scale=None, causal=True):
+def attention_causal_with_lse(query_states, key_states, value_states,
+                              scale=None, causal=True, use_log2=False):
     """
     计算单块内的因果注意力，返回 Output, 标准 LSE, 和 Log2 LSE
     Input Shape: (B, H, S, d)
@@ -37,23 +38,23 @@ def attention_causal_with_lse(query_states, key_states, value_states, scale=None
     attn_scores = query_states @ key_states.transpose(-2, -1)  # (B, H, S, S)
 
     if causal:
-        mask_template = torch.triu(torch.ones(S, S, device=device, dtype=torch.bool), diagonal=1)
-        mask = torch.zeros(S, S, device=device, dtype=dtype)
-        mask.masked_fill_(mask_template, float('-inf'))
-        attn_scores = attn_scores + mask
+        mask = torch.triu(torch.ones(S, S, device=query_states.device, dtype=torch.bool), diagonal=1)
+        attn_scores.masked_fill_(mask, float('-inf'))
 
-    # 1. 标准 LSE (base e)
-    lse = torch.logsumexp(attn_scores, dim=-1)  # (B, H, S)
-
-    # 2. Base-2 LSE
-    # log2(sum(2^x)) = logsumexp(x * ln(2)) / ln(2)
-    ln_2 = torch.tensor(math.log(2.0), device=device, dtype=dtype)
-    lse_base2 = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
-
-    attn_weights = attn_scores.softmax(dim=-1)
+    if not use_log2:
+        # 1. 标准 LSE (base e)
+        lse = torch.logsumexp(attn_scores, dim=-1)  # (B, H, S)
+        attn_weights = attn_scores.softmax(dim=-1)
+    else:
+        # 2. Base-2 LSE
+        # log2(sum(2^x)) = logsumexp(x * ln(2)) / ln(2)
+        ln_2 = math.log(2.0)
+        attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
+        lse = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
+        
     out = attn_weights @ value_states  # (B, H, S, d)
 
-    return out, lse, lse_base2
+    return out, lse
 
 def update_out_and_lse(
     out: Optional[torch.Tensor],
@@ -90,9 +91,11 @@ def _update_out_and_lse_impl(
     # torch.exp(lse - new_lse) * out + torch.exp(block_lse - new_lse) * block_out
     # For numerical stability, we use the "max trick"
     m = torch.max(block_lse, lse)
-    exp_sum = exp(block_lse-m) +exp(lse-m)
+    exp_old, exp_new = exp(lse - m), exp(block_lse - m)
+    exp_sum = exp_old + exp_new
+    
     new_lse = m + log(exp_sum)
-    new_out = (out *exp(lse-m) +block_out * exp(block_lse-m))/exp_sum
+    new_out = (out *exp_old +block_out * exp_new)/exp_sum
     
     # ref: https://github.com/zhuzilin/ring-flash-attention
     # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
