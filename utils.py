@@ -34,8 +34,9 @@ def attention_causal_with_lse(query_states, key_states, value_states,
     if scale is None:
         scale = d ** -0.5
     
-    query_states = query_states * scale
     attn_scores = query_states @ key_states.transpose(-2, -1)  # (B, H, S, S)
+    attn_scores = attn_scores.float()
+    attn_scores = attn_scores * scale
 
     if causal:
         mask = torch.triu(torch.ones(S, S, device=query_states.device, dtype=torch.bool), diagonal=1)
@@ -49,9 +50,10 @@ def attention_causal_with_lse(query_states, key_states, value_states,
         # 2. Base-2 LSE
         # log2(sum(2^x)) = logsumexp(x * ln(2)) / ln(2)
         ln_2 = math.log(2.0)
-        attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
         lse = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
-        
+        attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
+    
+    attn_weights = attn_weights.to(dtype)
     out = attn_weights @ value_states  # (B, H, S, d)
 
     return out, lse
@@ -79,7 +81,9 @@ def _update_out_and_lse_impl(
     """
     在线更新 Ring Attention 的累积结果 (Online Softmax 逻辑)
     """
-    block_out = block_out.to(out.dtype)
+    dtype = out.dtype
+    out, block_out = out.float(), block_out.float()
+
     block_lse = block_lse.unsqueeze(dim=-1) #(B, H, S, 1)
     lse = lse.unsqueeze(dim=-1)             #(B, H, S, 1)
 
@@ -102,4 +106,5 @@ def _update_out_and_lse_impl(
     # new_out = out - F.sigmoid(block_lse - lse) * (out - block_out)
     # new_lse = lse - F.logsigmoid(lse - block_lse)
 
+    new_out = new_out.to(dtype)
     return new_out, new_lse.squeeze(-1)

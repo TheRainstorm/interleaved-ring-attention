@@ -16,7 +16,7 @@ def main():
     S_local = S // cp_nranks
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.float32
+    dtype = torch.bfloat16
     use_log2 = True # 所有 exp 和 log 都使用 base-2
     
     print(f"B={B}, H={H}, S={S_ori} (Local S={S_local}), d={d}, CP={cp_nranks}")
@@ -36,11 +36,12 @@ def main():
     scale = 1.0 / math.sqrt(d)
 
     print("Computing global reference attention...")
-    out_ref, _ = attention_causal_with_lse(
+    out_ref, lse_ref = attention_causal_with_lse(
         q_ori.transpose(2, 1),
         k_ori.transpose(2, 1),
         v_ori.transpose(2, 1), scale=scale, causal=True, use_log2=use_log2)
     out_ref = out_ref.transpose(2, 1)  # (B, S_ori, H, d)
+    print(f'{out_ref.dtype=} {lse_ref.dtype=}')
 
     print("Computing interleaved ring attention...")
     
@@ -48,6 +49,7 @@ def main():
     k_dist = k.reshape(B, S_local, cp_nranks, H, d)
     v_dist = v.reshape(B, S_local, cp_nranks, H, d)
     ring_final_out = torch.zeros_like(q_dist)  # (B, S_local, CP, H, d)
+    print(f'{q_dist.dtype=} {ring_final_out.dtype=}')
     for i in range(cp_nranks):
         q_local = q_dist[:, :, i, :, :].transpose(1, 2)
         
