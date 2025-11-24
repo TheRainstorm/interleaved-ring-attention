@@ -15,11 +15,16 @@ def cmp(o1, o2, msg='cmp'):
     
     max_error = torch.max(torch.abs(o1 - o2)).item()
     mean_abs_error = (torch.sum(torch.abs(o1 - o2)) / o2.numel()).item()
+
+    positions = (torch.abs(o1 - o2) == max_error).nonzero(as_tuple=False)
+    first_position = tuple(positions[0].tolist())
+    value1 = o1[first_position].item()
+    value2 = o2[first_position].item()
     
     # 计算余弦相似度
     cos_sim = F.cosine_similarity(o1.flatten(), o2.flatten(), dim=0).item()
     
-    print(f'{msg:35s}: CosSim={cos_sim:.6f}, MAE={mean_abs_error:.6f}, MaxError={max_error:.6f}')
+    print(f'{msg:35s}: CosSim={cos_sim:.6f}, MAE={mean_abs_error:.6f}, MaxError={max_error:.6f} ({value1:.6f} {value2:.6f})')
     
 def attention_causal_with_lse(query_states, key_states, value_states,
                               scale=None, causal=True, use_log2=False):
@@ -28,9 +33,6 @@ def attention_causal_with_lse(query_states, key_states, value_states,
     Input Shape: (B, H, S, d)
     """
     B, H, S, d = query_states.shape
-    device = query_states.device
-    dtype = query_states.dtype
-
     if scale is None:
         scale = d ** -0.5
     
@@ -53,7 +55,7 @@ def attention_causal_with_lse(query_states, key_states, value_states,
         lse = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
         attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
     
-    attn_weights = attn_weights.to(dtype)
+    attn_weights = attn_weights.to(query_states.dtype)
     out = attn_weights @ value_states  # (B, H, S, d)
 
     return out, lse
@@ -67,12 +69,12 @@ def update_out_and_lse(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
     if out is None:
-        return block_out.clone(), block_lse.clone()
+        return block_out.float(), block_lse
     
-    return _update_out_and_lse_impl(out, lse, block_out, block_lse, use_log2)
+    return _update_out_and_lse_impl(out, lse, block_out.float(), block_lse, use_log2)
 
 def _update_out_and_lse_impl(
-    out: torch.Tensor,
+    out: torch.Tensor,          # all float32
     lse: torch.Tensor,
     block_out: torch.Tensor,
     block_lse: torch.Tensor,
@@ -81,11 +83,15 @@ def _update_out_and_lse_impl(
     """
     在线更新 Ring Attention 的累积结果 (Online Softmax 逻辑)
     """
-    dtype = out.dtype
-    out, block_out = out.float(), block_out.float()
+    lse, block_lse = lse.unsqueeze(dim=-1), block_lse.unsqueeze(dim=-1) #(B, H, S, 1)
 
-    block_lse = block_lse.unsqueeze(dim=-1) #(B, H, S, 1)
-    lse = lse.unsqueeze(dim=-1)             #(B, H, S, 1)
+    if not use_log2:
+        # ref: https://github.com/zhuzilin/ring-flash-attention
+        # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
+        new_out = out - F.sigmoid(block_lse - lse) * (out - block_out)
+        new_lse = lse - F.logsigmoid(lse - block_lse)
+
+        return new_out, new_lse.squeeze(-1)
 
     log, exp = torch.log, torch.exp
     if use_log2:
@@ -100,11 +106,5 @@ def _update_out_and_lse_impl(
     
     new_lse = m + log(exp_sum)
     new_out = (out *exp_old +block_out * exp_new)/exp_sum
-    
-    # ref: https://github.com/zhuzilin/ring-flash-attention
-    # https://github.com/zhuzilin/ring-flash-attention/pull/34#issuecomment-2076126795
-    # new_out = out - F.sigmoid(block_lse - lse) * (out - block_out)
-    # new_lse = lse - F.logsigmoid(lse - block_lse)
 
-    new_out = new_out.to(dtype)
     return new_out, new_lse.squeeze(-1)
