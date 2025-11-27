@@ -29,8 +29,9 @@ def cmp(o1, o2, msg='cmp'):
 def attention_causal_with_lse(query_states, key_states, value_states,
                               scale=None, causal=True, use_log2=False):
     """
-    计算单块内的因果注意力，返回 Output, 标准 LSE, 和 Log2 LSE
+    计算单块内的因果注意力
     Input Shape: (B, H, S, d)
+    Output: out 始终是全 base-e 的，lse 返回 lse/ln2 当 use_log2=True 时
     """
     B, H, S, d = query_states.shape
     if scale is None:
@@ -47,14 +48,17 @@ def attention_causal_with_lse(query_states, key_states, value_states,
     if not use_log2:
         # 1. 标准 LSE (base e)
         lse = torch.logsumexp(attn_scores, dim=-1)  # (B, H, S)
-        attn_weights = attn_scores.softmax(dim=-1)
     else:
         # 2. Base-2 LSE
-        # log2(sum(2^x)) = logsumexp(x * ln(2)) / ln(2)
         ln_2 = math.log(2.0)
-        lse = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
-        attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
+        # log2(sum(2^x)) = logsumexp(x * ln(2)) / ln(2)
+        # lse = torch.logsumexp(attn_scores * ln_2, dim=-1) / ln_2
+        # attn_weights = (attn_scores * ln_2).softmax(dim=-1)  # log2 时, out 也要使用基于 2 的 softmax 加权
+        
+        # 参考 FlashMLA，实际计算的是 log2(sum(e^x))
+        lse = torch.logsumexp(attn_scores, dim=-1) / ln_2
     
+    attn_weights = attn_scores.softmax(dim=-1)
     attn_weights = attn_weights.to(query_states.dtype)
     out = attn_weights @ value_states  # (B, H, S, d)
 

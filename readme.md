@@ -23,4 +23,19 @@ When $p_i \ge p_j$, it's a standard casual attention. When $p_i < p_j$, the atte
 
 ## Python proof-of-code
 
-See [interleaved_ring_attention.py], which verifies the interleaved ring attention implementation and compares its output with standard attention.
+See interleaved_ring_attention.py, which verifies the interleaved ring attention implementation and compares its output with standard attention.
+
+### about log2 lse
+
+In Ring Attention, the cumulative out and lse (log-sum-exp) values are updated with the out and lse from the current block. The standard update formulas are base-e:
+
+$$
+out_{new} = \frac{out_1 \exp(lse_1) + out_2 \exp(lse_2)}{\exp(lse_1)+\exp(lse_2)}\\
+lse_{new} = \log{(\exp(lse_i)+\exp(lse_i))}
+$$
+
+While implementing Ring Attention using flashinfer as the attention library, I encountered incorrect results. After inspecting the `merge_state` kernel in the flashinfer source code, I noticed that it replaces all exp and log operations with their base-2 equivalents (exp2, log2).
+
+My initial hypothesis was that the formulas would remain correct as long as all exp and log operations within the LSE calculation were consistently base-2. To test this, I created a Python simulation where my PyTorch-based attention function returned `lse(x) = log2(sum(2^x))`. However, the Ring Attention verification using this LSE failed. Curiously, the verification succeeded if the out value from the attention function (`out = softmax(QK)V`) was also computed using a base-2 softmax. This behavior seemed strange.
+
+The puzzle was solved when I examined the LSE implementation in FlashMLA. I realized that the correct LSE definition in this context is `lse(x) = log2(sum(e^x))`. When using this definition, the out value can be computed with the standard, base-e softmax, and the final results match perfectly.
