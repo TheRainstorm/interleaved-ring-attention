@@ -91,17 +91,27 @@ def attention_causal_with_lse(query_states, key_states, value_states,
     return out, lse
 
 def update_out_and_lse(
-    out: Optional[torch.Tensor],
+    out: Optional[torch.Tensor],  # (B, H, S_local, d)
     lse: Optional[torch.Tensor],
     block_out: torch.Tensor,
     block_lse: torch.Tensor,
     use_log2: bool = False,
+    skip_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
     if out is None:
-        return block_out.float(), block_lse
+        assert skip_first is False
+        out_new, lse_new = block_out.float(), block_lse
+        out, lse = out_new, lse_new
+        return out, lse
     
-    return _update_out_and_lse_impl(out, lse, block_out.float(), block_lse, use_log2)
+    if skip_first:
+        out_new, lse_new = _update_out_and_lse_impl(out[:, :, 1:, :], lse[:, :, 1:], block_out.float()[:, :, 1:, :], block_lse[:, :, 1:], use_log2)
+        out[:, :, 1:, :], lse[:, :, 1:] = out_new, lse_new
+    else:
+        out_new, lse_new = _update_out_and_lse_impl(out, lse, block_out.float(), block_lse, use_log2)
+        out[:], lse[:] = out_new, lse_new
+    return out, lse
 
 def _update_out_and_lse_impl(
     out: torch.Tensor,          # all float32

@@ -112,6 +112,7 @@ def main():
             k_local = k_concat_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank + qk_rope_head)
             v_local = c_kv_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank)
             
+            is_full_triangular = (i >= j)
             if i >= j:
                 # with full triangular mask
                 block_out, block_lse = attention_causal_with_lse(
@@ -128,19 +129,19 @@ def main():
                 
                 block_out = torch.zeros((B, h_q, S_local, kv_lora_rank), device=device, dtype=torch.float32)
                 block_lse = torch.zeros((B, h_q, S_local), device=device, dtype=torch.float32)
-                # trick: copy first
-                block_out[:, :, 0, :] = acc_out[:, :, 0, :]
-                block_lse[:, :, 0] = acc_lse[:, :, 0]
+                # # trick: copy first
+                # block_out[:, :, 0, :] = acc_out[:, :, 0, :]
+                # block_lse[:, :, 0] = acc_lse[:, :, 0]
                 
                 block_out[:, :, 1:, :] = block_out_sub
                 block_lse[:, :, 1:] = block_lse_sub
             
             # print(f'{block_out.shape=}, {block_lse.shape=}')
-            # if merge_after_absorb:
-            #     block_out = (block_out.transpose(1, 2).unsqueeze(-2) @ wkv_b_o).squeeze(-2).transpose(1, 2)  # (B, h_q, S_local, v_head_dim)
-            #     print(f'Absorb: {block_out.shape=}, {block_lse.shape=}')
+            if merge_after_absorb:
+                block_out = (block_out.transpose(1, 2).unsqueeze(-2) @ wkv_b_o).squeeze(-2).transpose(1, 2)  # (B, h_q, S_local, v_head_dim)
+                # print(f'Absorb: {block_out.shape=}, {block_lse.shape=}')
             
-            acc_out, acc_lse = update_out_and_lse(acc_out, acc_lse, block_out, block_lse, use_log2)
+            acc_out, acc_lse = update_out_and_lse(acc_out, acc_lse, block_out, block_lse, use_log2, skip_first=not is_full_triangular)
             # print(f'{acc_out.shape=}')
             
         if not merge_after_absorb:
