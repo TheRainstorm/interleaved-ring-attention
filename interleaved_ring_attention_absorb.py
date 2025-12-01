@@ -1,5 +1,5 @@
+import sys
 import torch
-# from flash_mla import get_mla_metadata, flash_mla_with_kvcache
 from utils import *
     
 def main():
@@ -24,6 +24,8 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.float32
     use_log2 = True
+    merge_after_absorb = bool(int(sys.argv[1])) if len(sys.argv) > 1 else True
+    print(f'{merge_after_absorb=}')
     
     # 定义统一的缩放因子
     scale = (qk_head_dim + qk_rope_head_dim) ** -0.5
@@ -92,13 +94,9 @@ def main():
     
     print("Computing interleaved ring attention...")
     q_dist = q2.reshape(B, S_local, cp_nranks, h_q, kv_lora_rank + qk_rope_head_dim)
-    # k_dist = k2.reshape(B, S_local, cp_nranks, h_q, kv_lora_rank + qk_rope_head_dim)
-    # v_dist = v2.reshape(B, S_local, cp_nranks, h_q, kv_lora_rank)
-    
     c_kv_dist = c_kv.reshape(B, S_local, cp_nranks, kv_lora_rank)
     k_pe_dist = k_pe.reshape(B, S_local, cp_nranks, qk_rope_head_dim)
-    
-    ring_final_out = torch.zeros((B, S_local, cp_nranks, h_q, kv_lora_rank), device=device, dtype=dtype)  # (B, S_local, CP, H, d)
+    out_ring_dist = torch.zeros((B, S_local, cp_nranks, h_q, v_head_dim), device=device, dtype=dtype)  # (B, S_local, CP, H, d)
     for i in range(cp_nranks):
         q_local = q_dist[:, :, i, :, :].transpose(1, 2) # (B, h_q, S_local, kv_lora_rank + qk_rope_head_dim)
         
@@ -109,16 +107,19 @@ def main():
             
             c_kv_j = c_kv_dist[:, :, j, :] # (B, S_local, kv_lora_rank)
             k_pe_j = k_pe_dist[:, :, j, :]  # (B, S_local, qk_rope_head_dim)
-            
             k_concat_j = torch.concat([c_kv_j, k_pe_j], dim=-1)  # (B, S_local, kv_lora_rank + qk_rope_head_dim)
+            
             k_local = k_concat_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank + qk_rope_head)
             v_local = c_kv_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank)
             
             if i >= j:
+                # with full triangular mask
                 block_out, block_lse = attention_causal_with_lse(
                     q_local, k_local, v_local, scale=scale, causal=True, use_log2=use_log2
                 )
+                
             else:
+                # with sub-triangular mask (diagonal removed)
                 block_out_sub, block_lse_sub = attention_causal_with_lse(
                     q_local[:, :, 1:, :],
                     k_local[:, :, :-1, :], v_local[:, :, :-1, :],
@@ -134,12 +135,19 @@ def main():
                 block_out[:, :, 1:, :] = block_out_sub
                 block_lse[:, :, 1:] = block_lse_sub
             
+            # print(f'{block_out.shape=}, {block_lse.shape=}')
+            # if merge_after_absorb:
+            #     block_out = (block_out.transpose(1, 2).unsqueeze(-2) @ wkv_b_o).squeeze(-2).transpose(1, 2)  # (B, h_q, S_local, v_head_dim)
+            #     print(f'Absorb: {block_out.shape=}, {block_lse.shape=}')
+            
             acc_out, acc_lse = update_out_and_lse(acc_out, acc_lse, block_out, block_lse, use_log2)
-        
-        ring_final_out[:, :, i, :, :] = acc_out.transpose(1, 2).to(dtype)
+            # print(f'{acc_out.shape=}')
+            
+        if not merge_after_absorb:
+            acc_out = (acc_out.transpose(1, 2).unsqueeze(-2) @ wkv_b_o).squeeze(-2).transpose(1, 2)  # (B, h_q, S_local, v_head_dim)
+        out_ring_dist[:, :, i, :, :] = acc_out.transpose(1, 2).to(dtype)
 
-    out_ring_raw = ring_final_out.view(B, S, h_q, kv_lora_rank).cuda()
-    out_ring = (out_ring_raw.unsqueeze(-2) @ wkv_b_o).squeeze(-2)
+    out_ring = out_ring_dist.view(B, S, h_q, v_head_dim)
     print(f'{out_ring.shape=}')
     
     print("\nFinal Comparison:")
