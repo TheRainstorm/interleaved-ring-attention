@@ -72,10 +72,7 @@ def main():
                 )
                 
                 block_out = torch.zeros((B, H, S_local, d), device=device, dtype=torch.float32)
-                block_lse = torch.zeros((B, H, S_local), device=device, dtype=torch.float32)
-                # trick: copy first
-                block_out[:, :, 0, :] = acc_out[:, :, 0, :]
-                block_lse[:, :, 0] = acc_lse[:, :, 0]
+                block_lse = torch.full((B, H, S_local), float('-inf'), device=device, dtype=torch.float32)
                 
                 block_out[:, :, 1:, :] = block_out_sub
                 block_lse[:, :, 1:] = block_lse_sub

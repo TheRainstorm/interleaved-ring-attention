@@ -96,22 +96,12 @@ def update_out_and_lse(
     block_out: torch.Tensor,
     block_lse: torch.Tensor,
     use_log2: bool = False,
-    skip_first: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     
     if out is None:
-        assert skip_first is False
-        out_new, lse_new = block_out.float(), block_lse
-        out, lse = out_new, lse_new
-        return out, lse
+        return block_out.float(), block_lse
     
-    if skip_first:
-        out_new, lse_new = _update_out_and_lse_impl(out[:, :, 1:, :], lse[:, :, 1:], block_out.float()[:, :, 1:, :], block_lse[:, :, 1:], use_log2)
-        out[:, :, 1:, :], lse[:, :, 1:] = out_new, lse_new
-    else:
-        out_new, lse_new = _update_out_and_lse_impl(out, lse, block_out.float(), block_lse, use_log2)
-        out[:], lse[:] = out_new, lse_new
-    return out, lse
+    return _update_out_and_lse_impl(out, lse, block_out.float(), block_lse, use_log2)
 
 def _update_out_and_lse_impl(
     out: torch.Tensor,          # all float32

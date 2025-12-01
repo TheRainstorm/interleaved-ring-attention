@@ -112,13 +112,11 @@ def main():
             k_local = k_concat_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank + qk_rope_head)
             v_local = c_kv_j.unsqueeze(-2).expand(-1, -1, h_q, -1).transpose(1, 2)  # (B, h_q, S_local, kv_lora_rank)
             
-            is_full_triangular = (i >= j)
             if i >= j:
                 # with full triangular mask
                 block_out, block_lse = attention_causal_with_lse(
                     q_local, k_local, v_local, scale=scale, causal=True, use_log2=use_log2
                 )
-                
             else:
                 # with sub-triangular mask (diagonal removed)
                 block_out_sub, block_lse_sub = attention_causal_with_lse(
@@ -128,10 +126,7 @@ def main():
                 )
                 
                 block_out = torch.zeros((B, h_q, S_local, kv_lora_rank), device=device, dtype=torch.float32)
-                block_lse = torch.zeros((B, h_q, S_local), device=device, dtype=torch.float32)
-                # # trick: copy first
-                # block_out[:, :, 0, :] = acc_out[:, :, 0, :]
-                # block_lse[:, :, 0] = acc_lse[:, :, 0]
+                block_lse = torch.full((B, h_q, S_local), float('-inf'), device=device, dtype=torch.float32)
                 
                 block_out[:, :, 1:, :] = block_out_sub
                 block_lse[:, :, 1:] = block_lse_sub
@@ -141,7 +136,7 @@ def main():
                 block_out = (block_out.transpose(1, 2).unsqueeze(-2) @ wkv_b_o).squeeze(-2).transpose(1, 2)  # (B, h_q, S_local, v_head_dim)
                 # print(f'Absorb: {block_out.shape=}, {block_lse.shape=}')
             
-            acc_out, acc_lse = update_out_and_lse(acc_out, acc_lse, block_out, block_lse, use_log2, skip_first=not is_full_triangular)
+            acc_out, acc_lse = update_out_and_lse(acc_out, acc_lse, block_out, block_lse, use_log2)
             # print(f'{acc_out.shape=}')
             
         if not merge_after_absorb:
@@ -149,7 +144,7 @@ def main():
         out_ring_dist[:, :, i, :, :] = acc_out.transpose(1, 2).to(dtype)
 
     out_ring = out_ring_dist.view(B, S, h_q, v_head_dim)
-    print(f'{out_ring.shape=}')
+    print(f'{out_ring.shape=} {out_ring.dtype=}')
     
     print("\nFinal Comparison:")
     cmp(out_ring[:, :S_ori, :, :], out_ref[:, :S_ori, :, :], "Interleaved Ring vs Torch Global")
