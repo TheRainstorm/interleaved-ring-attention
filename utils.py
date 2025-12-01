@@ -138,3 +138,52 @@ def _update_out_and_lse_impl(
     new_out = (out *exp_old +block_out * exp_new)/exp_sum
 
     return new_out, new_lse.squeeze(-1)
+
+def update_out_and_lse_all_gather(
+    out_dist: torch.Tensor,          # all float32
+    lse_dist: torch.Tensor,
+    use_log2: bool = False,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    根据每张卡 out, lse 计算最终结果 (Online Softmax 逻辑)
+    out_dist: (B, H, S, CP, d)
+    lse_dist: (B, H, S, CP)
+    """
+    cp_nranks = out_dist.shape[3]
+    
+    # 如果只有一个 rank/chunk，直接降维返回
+    if cp_nranks == 1:
+        return out_dist.squeeze(3), lse_dist.squeeze(3)
+
+    # 选择对数和指数函数基底
+    log, exp = (torch.log2, torch.exp2) if use_log2 else (torch.log, torch.exp)
+
+    # 1. 为了数值稳定性，先找到 CP 维度上的最大 LSE (Max Trick)
+    # lse_max shape: (B, H, S, 1)
+    lse_max, _ = torch.max(lse_dist, dim=-1, keepdim=True)
+
+    # 2. 计算每个 chunk 的权重因子 (unnormalized)
+    # lse_exp shape: (B, H, S, CP)
+    lse_exp = exp(lse_dist - lse_max)
+
+    # 3. 计算分母（指数和）
+    # lse_sum shape: (B, H, S, 1)
+    lse_sum = lse_exp.sum(dim=-1, keepdim=True)
+
+    # 4. 计算最终的 LSE
+    # Final LSE = max + log(sum(exp(lse - max)))
+    # shape: (B, H, S)
+    final_lse = (lse_max + log(lse_sum)).squeeze(-1)
+
+    # 5. 计算最终的 Output (加权平均)
+    # Weights = exp(lse_i - max) / sum(exp(lse_j - max))
+    # unsqueeze 为了广播到 hidden_dim (d) 维度: (B, H, S, CP, 1)
+    weights = (lse_exp / lse_sum).unsqueeze(-1)
+
+    # 执行加权求和
+    # out_dist: (B, H, S, CP, d)
+    # weights:  (B, H, S, CP, 1)
+    # sum dim=3 -> (B, H, S, d)
+    final_out = (out_dist * weights).sum(dim=3)
+
+    return final_out, final_lse
